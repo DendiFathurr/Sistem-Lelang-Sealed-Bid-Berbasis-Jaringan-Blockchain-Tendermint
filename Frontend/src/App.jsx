@@ -44,43 +44,24 @@ const INITIAL_ASSETS = [
   }
 ]
 
-// Helper: countdown string HH:MM:SS
-function countDown(timeStr) {
-  const parts = timeStr.split(':').map(Number)
-  let seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
-  if (seconds > 0) {
-    seconds--
-    const h = Math.floor(seconds / 3600).toString().padStart(2, '0')
-    const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0')
-    const s = (seconds % 60).toString().padStart(2, '0')
-    return `${h}:${m}:${s}`
-  }
-  return '00:00:00'
-}
-
-// Helper: generate automatic system commit hash
-function generateSystemHash(amount, assetName, nonce) {
-  const str = `${amount}:${assetName}:${nonce}`
-  let hash = 0
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i)
-    hash |= 0
-  }
-  let finalHash = ''
-  for (let j = 0; j < 4; j++) {
-    let subHash = hash ^ (j * 0x1f3c5b7d)
-    subHash = (subHash << 13) | (subHash >>> 19)
-    subHash = Math.imul(subHash ^ (subHash >>> 15), 0x85ebca6b)
-    subHash = Math.imul(subHash ^ (subHash >>> 13), 0xc2b2ae35)
-    subHash ^= subHash >>> 16
-    finalHash += (subHash >>> 0).toString(16).padStart(8, '0')
-  }
-  return '0x' + finalHash
+// Helper: get exact time left string based on biddingEnd date
+function getTimeLeftString(biddingEnd) {
+  if (!biddingEnd) return '00:00:00';
+  const diff = new Date(biddingEnd).getTime() - Date.now();
+  if (diff <= 0) return '00:00:00';
+  const hours = Math.floor(diff / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+  const h = hours.toString().padStart(2, '0');
+  const m = minutes.toString().padStart(2, '0');
+  const s = seconds.toString().padStart(2, '0');
+  return `${h}:${m}:${s}`;
 }
 
 function App() {
   // --- Auth State ---
-  const [currentPage, setCurrentPage] = useState('bids') // 'auth' | 'bids'
+  const [currentPage, setCurrentPage] = useState('auth') // Default to auth page
+  const [user, setUser] = useState(null)
   const [activeTab, setActiveTab] = useState('marketplace')
 
   // --- Wallet State ---
@@ -88,9 +69,8 @@ function App() {
   const [walletAddress, setWalletAddress] = useState('')
   const [balance, setBalance] = useState(4.5)
 
-  const [assets, setAssets] = useState(INITIAL_ASSETS)
-  const [selectedAsset, setSelectedAsset] = useState(INITIAL_ASSETS[0])
-  // Salt removed — hash is fully automatic from system
+  const [assets, setAssets] = useState([])
+  const [selectedAsset, setSelectedAsset] = useState(null)
   const [bidsSubmitted, setBidsSubmitted] = useState([])
   const [globalCommits, setGlobalCommits] = useState([])
   const [refundedBids, setRefundedBids] = useState([]) // Track bid timestamps that have been refunded
@@ -115,8 +95,6 @@ function App() {
     }
   }, [toast.show])
 
-
-
   const triggerLoading = (message, duration = 1200) => {
     setLoading({ show: true, message })
     return new Promise((resolve) => {
@@ -127,24 +105,123 @@ function App() {
     })
   }
 
-  // Countdown timer — ticks every second for all assets + selected
+  // Check Auth on Mount
+  useEffect(() => {
+    const savedToken = localStorage.getItem('token')
+    const savedUser = localStorage.getItem('user')
+    if (savedToken && savedUser) {
+      const parsedUser = JSON.parse(savedUser)
+      setUser(parsedUser)
+      setCurrentPage('bids')
+      if (parsedUser.walletAddress) {
+        setWalletAddress(parsedUser.walletAddress)
+        setWalletConnected(true)
+      }
+    } else {
+      setCurrentPage('auth')
+    }
+  }, [])
+
+  // Fetch Assets and Global Commitments from API
+  const fetchAssetsAndCommitments = async () => {
+    try {
+      const assetsRes = await fetch('http://localhost:5000/api/assets')
+      if (assetsRes.ok) {
+        const assetsData = await assetsRes.json()
+        const mappedAssets = assetsData.map(a => ({
+          ...a,
+          timeLeft: getTimeLeftString(a.biddingEnd)
+        }))
+        setAssets(mappedAssets)
+        
+        // Keep selected asset synced if it was selected
+        if (selectedAsset) {
+          const updatedSelected = mappedAssets.find(ma => ma.id === selectedAsset.id)
+          if (updatedSelected) {
+            setSelectedAsset(updatedSelected)
+          }
+        } else if (mappedAssets.length > 0 && !selectedAsset) {
+          setSelectedAsset(mappedAssets[0])
+        }
+      }
+
+      const commitsRes = await fetch('http://localhost:5000/api/commitments')
+      if (commitsRes.ok) {
+        const commitsData = await commitsRes.json()
+        const mappedCommits = commitsData.map(c => ({
+          id: c.id,
+          address: c.walletAddress,
+          time: new Date(c.timestamp).toLocaleTimeString(),
+          assetId: c.assetId
+        }))
+        setGlobalCommits(mappedCommits)
+      }
+    } catch (err) {
+      console.error('API connection error, using mock fallback assets:', err)
+      if (assets.length === 0) {
+        setAssets(INITIAL_ASSETS)
+        setSelectedAsset(INITIAL_ASSETS[0])
+      }
+    }
+  }
+
+  // Initial load
+  useEffect(() => {
+    fetchAssetsAndCommitments()
+  }, [])
+
+  // Refresh assets/commitments when tab changes
+  useEffect(() => {
+    if (currentPage === 'bids') {
+      fetchAssetsAndCommitments()
+    }
+  }, [activeTab, currentPage])
+
+  // Countdown timer ticking every second
   useEffect(() => {
     const timer = setInterval(() => {
-      setAssets((prev) => prev.map((a) => ({ ...a, timeLeft: countDown(a.timeLeft) })))
-      setSelectedAsset((prev) => ({ ...prev, timeLeft: countDown(prev.timeLeft) }))
+      setAssets((prev) => prev.map((a) => ({ ...a, timeLeft: getTimeLeftString(a.biddingEnd) })))
+      setSelectedAsset((prev) => prev ? { ...prev, timeLeft: getTimeLeftString(prev.biddingEnd) } : null)
     }, 1000)
     return () => clearInterval(timer)
   }, [])
 
+  // Handle User login success
+  const handleLoginSuccess = (userData) => {
+    setUser(userData)
+    if (userData.walletAddress) {
+      setWalletAddress(userData.walletAddress)
+      setWalletConnected(true)
+    }
+    setCurrentPage('bids')
+  }
+
   // Listen to accounts changed in MetaMask
   useEffect(() => {
     if (typeof window.ethereum !== 'undefined') {
-      const handleAccountsChanged = (accounts) => {
+      const handleAccountsChanged = async (accounts) => {
         if (accounts.length > 0) {
           const account = accounts[0]
           setWalletAddress(account)
           setWalletConnected(true)
           
+          if (user) {
+            try {
+              const res = await fetch('http://localhost:5000/api/auth/update-wallet', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nim: user.nim, walletAddress: account })
+              })
+              if (res.ok) {
+                const resData = await res.json()
+                setUser(resData.user)
+                localStorage.setItem('user', JSON.stringify(resData.user))
+              }
+            } catch (err) {
+              console.error('Error syncing wallet address with backend:', err)
+            }
+          }
+
           window.ethereum.request({
             method: 'eth_getChainId'
           }).then(() => {
@@ -170,7 +247,7 @@ function App() {
         window.ethereum.removeListener('accountsChanged', handleAccountsChanged)
       }
     }
-  }, [])
+  }, [user])
 
   // --- Handlers ---
   const handleConnectWallet = async () => {
@@ -189,6 +266,23 @@ function App() {
           setWalletAddress(account)
           setWalletConnected(true)
           
+          if (user) {
+            try {
+              const res = await fetch('http://localhost:5000/api/auth/update-wallet', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nim: user.nim, walletAddress: account })
+              })
+              if (res.ok) {
+                const resData = await res.json()
+                setUser(resData.user)
+                localStorage.setItem('user', JSON.stringify(resData.user))
+              }
+            } catch (err) {
+              console.error('Error syncing wallet address with backend:', err)
+            }
+          }
+
           const balanceWei = await window.ethereum.request({
             method: 'eth_getBalance',
             params: [account, 'latest']
@@ -212,7 +306,7 @@ function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  const handleSubmitBid = async (bidAmountStr) => {
+  const handleSubmitBid = async (bidAmountStr, saltKey, commitmentHash) => {
     const amount = parseFloat(bidAmountStr)
     if (isNaN(amount) || amount <= 0) {
       showToast('Masukkan jumlah penawaran yang valid.', 'warning')
@@ -224,47 +318,56 @@ function App() {
     }
 
     await triggerLoading('Mengirim komitmen penawaran ke blockchain...')
-    const nonce = Date.now().toString(36) + Math.random().toString(36).substring(2, 6)
-    const bidHash = generateSystemHash(amount, selectedAsset.name, nonce)
     
-    setBalance((prev) => parseFloat((prev - amount).toFixed(4)))
-    setBidsSubmitted((prev) => [
-      { assetName: selectedAsset.name, amount, hash: bidHash, timestamp: new Date().toLocaleTimeString(), revealed: false },
-      ...prev,
-    ])
-    setGlobalCommits((prev) => [
-      { id: Date.now(), address: walletAddress || '0x71C392B...Unknown', amount: amount, time: 'Baru saja' },
-      ...prev
-    ])
-    
-    // Dynamically update the highest bid for the active assets
-    setAssets((prev) =>
-      prev.map((a) => {
-        if (a.id === selectedAsset.id) {
-          return { ...a, currentBid: Math.max(a.currentBid, amount) }
-        }
-        return a
-      })
-    )
-    setSelectedAsset((prev) => ({
-      ...prev,
-      currentBid: Math.max(prev.currentBid, amount),
-    }))
+    try {
+      const response = await fetch('http://localhost:5000/api/commitments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assetId: selectedAsset.id,
+          walletAddress: walletAddress || '0x71C392B...Unknown',
+          commitmentHash: commitmentHash
+        })
+      });
 
-    const shortAddr = (walletAddress || '0x71C392B...').substring(0, 6) + '...' + (walletAddress || 'Unknown').substring((walletAddress || 'Unknown').length - 4)
-    showToast(`Node ${shortAddr} menaruh bid ${amount.toFixed(2)} ETH pada ${selectedAsset.name}`, 'success')
+      if (!response.ok) {
+        throw new Error('Gagal menyimpan komitmen ke backend.');
+      }
+
+      setBalance((prev) => parseFloat((prev - amount).toFixed(4)))
+      
+      setBidsSubmitted((prev) => [
+        { 
+          assetId: selectedAsset.id,
+          assetName: selectedAsset.name, 
+          amount, 
+          salt: saltKey, 
+          hash: commitmentHash, 
+          timestamp: new Date().toLocaleTimeString(), 
+          revealed: false 
+        },
+        ...prev,
+      ])
+
+      fetchAssetsAndCommitments()
+
+      const shortAddr = (walletAddress || '0x71C392B...').substring(0, 6) + '...' + (walletAddress || 'Unknown').substring((walletAddress || 'Unknown').length - 4)
+      showToast(`Komitmen penawaran oleh ${shortAddr} berhasil dikirim ke blockchain!`, 'success')
+    } catch (err) {
+      console.error(err)
+      showToast(err.message || 'Gagal mengirim komitmen ke blockchain.', 'error')
+    }
   }
 
-  // Salt regeneration removed — fully automatic
-
-  const handleRevealBidSuccess = (bidHash) => {
+  const handleRevealBidSuccess = (bidHash, revealedAmount) => {
     setBidsSubmitted((prev) =>
-      prev.map((b) => (b.hash === bidHash ? { ...b, revealed: true } : b))
+      prev.map((b) => (b.hash === bidHash ? { ...b, revealed: true, amount: revealedAmount } : b))
     )
+    fetchAssetsAndCommitments()
   }
 
   const handleWithdrawRefund = async (refundAmount, bidTimestamp) => {
-    if (refundedBids.includes(bidTimestamp)) return // Already refunded
+    if (refundedBids.includes(bidTimestamp)) return
     await triggerLoading('Menarik pengembalian dana dari contract...')
     setBalance((prev) => parseFloat((prev + refundAmount).toFixed(4)))
     setRefundedBids((prev) => [...prev, bidTimestamp])
@@ -272,7 +375,7 @@ function App() {
   }
 
   const handleClaimAsset = async (bidTimestamp, assetName) => {
-    if (claimedBids.includes(bidTimestamp)) return // Already claimed
+    if (claimedBids.includes(bidTimestamp)) return
     await triggerLoading('Mengklaim kepemilikan aset digital...')
     setClaimedBids((prev) => [...prev, bidTimestamp])
     showToast(`Sukses! Kepemilikan aset "${assetName}" telah ditransfer ke dompet Anda.`, 'success')
@@ -280,10 +383,7 @@ function App() {
 
   // --- Render ---
   if (currentPage === 'auth') {
-    return <AuthPage onLoginSuccess={() => {
-      showToast('Berhasil masuk ke node protokol!', 'success')
-      setCurrentPage('bids')
-    }} showToast={showToast} triggerLoading={triggerLoading} />
+    return <AuthPage onLoginSuccess={handleLoginSuccess} showToast={showToast} triggerLoading={triggerLoading} />
   }
 
   return (
@@ -291,6 +391,12 @@ function App() {
       activeTab={activeTab}
       onTabChange={setActiveTab}
       onLogout={() => {
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        setUser(null)
+        setWalletConnected(false)
+        setWalletAddress('')
+        setBalance(4.5)
         showToast('Keluar dari sesi protokol.', 'info')
         setCurrentPage('auth')
       }}
@@ -317,6 +423,7 @@ function App() {
             onAssetChange={setSelectedAsset}
             balance={balance}
             onSubmitBid={handleSubmitBid}
+            walletAddress={walletAddress}
           />
         )}
 

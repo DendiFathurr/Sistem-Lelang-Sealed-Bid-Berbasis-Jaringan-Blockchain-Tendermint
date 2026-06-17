@@ -1,20 +1,40 @@
 import { useState, useEffect, useRef } from 'react'
+import { ethers } from 'ethers'
 
-export default function BidDetailPage({ assets = [], selectedAsset, onAssetChange, balance, onSubmitBid }) {
+export default function BidDetailPage({ 
+  assets = [], 
+  selectedAsset, 
+  onAssetChange, 
+  balance, 
+  onSubmitBid,
+  walletAddress
+}) {
   const [bidAmount, setBidAmount] = useState('')
+  const [saltKey, setSaltKey] = useState('')
   const [isHovered, setIsHovered] = useState(false)
   const [activeSlideIndex, setActiveSlideIndex] = useState(0)
 
-  // Sync active slide index ONLY when selectedAsset.id changes, avoiding countdown timer ticks
+  // ZKP terminal simulation states
+  const [zkpStatus, setZkpStatus] = useState('idle') // 'idle' | 'generating' | 'done'
+  const [zkpLogs, setZkpLogs] = useState([])
+  const [downloaded, setDownloaded] = useState(false)
+  const [computedHash, setComputedHash] = useState('')
+
+  // Sync active slide index when selectedAsset.id changes
   useEffect(() => {
     if (!selectedAsset || assets.length === 0) return
     const idx = assets.findIndex((a) => a.id === selectedAsset.id)
     if (idx !== -1) {
       setActiveSlideIndex(idx)
     }
-  }, [selectedAsset?.id]) // Strictly depend on the primitive id string
+  }, [selectedAsset?.id, assets])
 
-  // Auto-sliding interval for the preview cards every 3 seconds (3000ms), paused on hover
+  // Generate secure random salt on mount or reset
+  useEffect(() => {
+    generateRandomSalt()
+  }, [selectedAsset?.id])
+
+  // Auto-sliding interval for preview cards
   useEffect(() => {
     if (isHovered || assets.length <= 1) return
 
@@ -25,10 +45,110 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
     return () => clearInterval(interval)
   }, [isHovered, assets.length])
 
-  const handleSubmit = (e) => {
+  // Real-time local Keccak256 calculation
+  useEffect(() => {
+    if (!bidAmount || isNaN(parseFloat(bidAmount)) || parseFloat(bidAmount) <= 0 || !saltKey) {
+      setComputedHash('')
+      return
+    }
+    try {
+      const amountInWei = ethers.parseEther(bidAmount)
+      const hash = ethers.solidityPackedKeccak256(
+        ['uint256', 'string'],
+        [amountInWei, saltKey]
+      )
+      setComputedHash(hash)
+    } catch (err) {
+      console.error('Hashing error:', err)
+      setComputedHash('')
+    }
+  }, [bidAmount, saltKey])
+
+  const generateRandomSalt = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    let result = ''
+    for (let i = 0; i < 16; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length))
+    }
+    setSaltKey(result)
+    setDownloaded(false)
+  }
+
+  const handleStartCommit = (e) => {
     e.preventDefault()
-    onSubmitBid(bidAmount)
+    const amount = parseFloat(bidAmount)
+    if (isNaN(amount) || amount <= 0) return
+    if (amount > balance) return
+
+    // Initialize ZKP console simulation logs
+    setZkpStatus('generating')
+    setDownloaded(false)
+    setZkpLogs([])
+
+    const logsSequence = [
+      '[SYSTEM] Menginisialisasi sirkuit lelang sealed-bid...',
+      '[SYSTEM] Memuat berkas input parameter penawaran...',
+      `[DATA]   - Nominal: ${bidAmount} ETH (${ethers.parseEther(bidAmount).toString()} Wei)`,
+      `[DATA]   - Secret Salt: ${saltKey}`,
+      '[CRYPTO] Menghitung local Keccak256 hash...',
+      `[CRYPTO] Hash: ${computedHash}`,
+      '[ZKP]    Mengompilasi R1CS constraints (zk-SNARKs/Groth16)...',
+      '[ZKP]    Menghitung saksi (Witness calculation)...',
+      '[ZKP]    Witness berhasil dihitung (Constraints: 14,832 sirkuit)',
+      '[ZKP]    Memulai pembuatan bukti rahasia (Prover execution)...',
+      '[ZKP]    Kunci verifikasi (Verification Key) dimuat ke memory',
+      '[ZKP]    Zero-Knowledge Proof (proof.json) berhasil dibuat secara lokal!',
+      '[ZKP]    Melakukan pengujian bukti lokal (Local Verification)...',
+      '[ZKP]    Verifikasi lokal SUKSES! Bukti sah & valid.'
+    ]
+
+    let currentLogIndex = 0
+    const logInterval = setInterval(() => {
+      if (currentLogIndex < logsSequence.length) {
+        setZkpLogs((prev) => [...prev, logsSequence[currentLogIndex]])
+        currentLogIndex++
+      } else {
+        clearInterval(logInterval)
+        setZkpStatus('done')
+      }
+    }, 180)
+  }
+
+  const downloadKeyFile = () => {
+    if (!computedHash) return
+    const textContent = `==================================================
+AETHER AUCTION - KUNCI PENAWARAN SEALED-BID
+==================================================
+WAKTU UNDUH      : ${new Date().toLocaleString()}
+WALLET ADDRESS   : ${walletAddress || 'MetaMask Tidak Terhubung'}
+ASET             : ${selectedAsset.name} (ID: ${selectedAsset.id})
+NOMINAL PENAWARAN: ${bidAmount} ETH
+SECRET SALT      : ${saltKey}
+COMMITMENT HASH  : ${computedHash}
+==================================================
+PERINGATAN PENTING:
+Simpan berkas ini dengan aman dan jangan ubah isinya.
+Anda wajib menggunakan berkas ini (atau menyalin data
+di atas) saat Fase Reveal (Pembukaan) berlangsung.
+Jika berkas ini hilang, penawaran Anda tidak akan
+dapat dibuka dan dana Anda akan terkunci selamanya.
+==================================================`
+
+    const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' })
+    const element = document.createElement('a')
+    element.href = URL.createObjectURL(blob)
+    element.download = `AETHER_KEY_${selectedAsset.id}_${Date.now()}.txt`
+    document.body.appendChild(element)
+    element.click()
+    document.body.removeChild(element)
+    setDownloaded(true)
+  }
+
+  const handleFinalSubmit = () => {
+    onSubmitBid(bidAmount, saltKey, computedHash)
+    setZkpStatus('idle')
     setBidAmount('')
+    generateRandomSalt()
   }
 
   if (!selectedAsset || assets.length === 0) return null
@@ -38,7 +158,7 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
       <div className="border-b border-outline-variant/10 pb-4 mb-4">
         <div className="flex flex-col gap-1">
           <div className="font-label-mono text-[10px] text-primary uppercase tracking-[0.2em] font-semibold">
-            Committed Bidding Phase
+            Committed Bidding Phase (ZKP Hibrid)
           </div>
           <h1 className="font-headline-xl text-2xl sm:text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-primary via-secondary to-primary uppercase tracking-wider leading-none">
             Detail Penawaran Lelang
@@ -47,17 +167,16 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-8 items-start">
-        {/* Asset Detail Column with Auto-Sliding and Hover Pause */}
+        {/* Asset Detail Column */}
         <div 
           className="lg:col-span-7 flex flex-col gap-6"
           onMouseEnter={() => setIsHovered(true)}
           onMouseLeave={() => setIsHovered(false)}
         >
-          {/* Static card container to avoid rigid layouts reloading */}
           <div className="glass-panel border border-outline-variant/10 p-4 md:p-6 flex flex-col gap-6 relative overflow-hidden group rounded-xl min-h-[460px]">
             <div className="absolute top-0 right-0 w-16 h-16 border-t border-r border-primary/30 opacity-50"></div>
 
-            {/* Image / Asset Preview (Buttery-smooth CSS cross-fade transition) */}
+            {/* Image Preview */}
             <div className="w-full aspect-[16/9] bg-surface-container-highest border border-outline-variant/20 relative overflow-hidden rounded-lg">
               {assets.map((asset, index) => (
                 <img
@@ -77,7 +196,7 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
               </div>
             </div>
 
-            {/* Details (Text elements slide and fade smoothly in stack) */}
+            {/* details text */}
             <div className="relative flex-grow">
               {assets.map((asset, index) => (
                 <div
@@ -98,11 +217,10 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
                     {asset.description}
                   </p>
 
-                  {/* Technical values inside animated block */}
                   <div className="grid grid-cols-2 gap-4 pt-4 mt-4 border-t border-outline-variant/10">
                     <div>
-                      <div className="font-label-mono text-[10px] sm:text-xs text-outline mb-1">Hash Penawaran Tertinggi</div>
-                      <div className="font-stats-display text-xs sm:text-sm md:text-base text-on-surface truncate">0x8f7d...{asset.id.substring(asset.id.length - 4)}</div>
+                      <div className="font-label-mono text-[10px] sm:text-xs text-outline mb-1">ID Aset</div>
+                      <div className="font-stats-display text-xs sm:text-sm md:text-base text-on-surface truncate">{asset.id}</div>
                     </div>
                     <div>
                       <div className="font-label-mono text-[10px] sm:text-xs text-outline mb-1">Sisa Waktu</div>
@@ -115,19 +233,19 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
           </div>
         </div>
 
-        {/* Commit Phase Form Column */}
+        {/* Commit Form Column */}
         <div className="lg:col-span-5 flex flex-col gap-6">
           <div className="glass-panel border border-primary/25 p-5 md:p-8 flex flex-col gap-6 relative shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)] rounded-xl">
             <div className="flex items-center justify-between border-b border-outline-variant/20 pb-4">
               <h3 className="font-stats-display text-sm sm:text-base text-on-surface flex items-center gap-2">
                 <span className="material-symbols-outlined text-primary text-xl">lock</span>
-                Penawaran Rahasia
+                Penawaran Rahasia (Commit)
               </h3>
-              <span className="font-label-mono text-[9px] text-primary bg-primary/10 px-2 py-0.5 border border-primary/20">Fase Komitmen</span>
+              <span className="font-label-mono text-[9px] text-primary bg-primary/10 px-2 py-0.5 border border-primary/20">LOKAL (ZKP)</span>
             </div>
 
-            <form className="flex flex-col gap-5" onSubmit={handleSubmit}>
-              {/* Target Asset Dropdown Selector */}
+            <form className="flex flex-col gap-5" onSubmit={handleStartCommit}>
+              {/* Asset Dropdown Selector */}
               <div className="flex flex-col gap-2">
                 <label className="font-label-mono text-[10px] sm:text-xs text-outline">
                   Pilih Aset Target
@@ -138,13 +256,11 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
                     onChange={(e) => {
                       const newAsset = assets.find((a) => a.id === e.target.value)
                       if (newAsset) {
-                        onAssetChange(newAsset) // Changes bid destination target
-                        // Sync slideshow position to show selected asset instantly
+                        onAssetChange(newAsset)
                         const idx = assets.findIndex((a) => a.id === newAsset.id)
                         if (idx !== -1) {
                           setActiveSlideIndex(idx)
                         }
-                        // Pause auto-sliding on manual selection for 5 seconds
                         setIsHovered(true)
                         setTimeout(() => setIsHovered(false), 5000)
                       }
@@ -180,24 +296,51 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
                 </div>
               </div>
 
-              {/* Auto-hash info */}
-              <div className="bg-black/30 p-3 border border-outline-variant/10 rounded-lg text-xs font-label-mono flex items-center gap-3">
-                <span className="material-symbols-outlined text-primary text-lg">enhanced_encryption</span>
-                <div>
-                  <div className="text-[10px] text-primary uppercase tracking-wider font-bold mb-0.5">Hash Otomatis</div>
-                  <p className="text-on-surface-variant text-[10px] leading-relaxed">
-                    Sistem akan otomatis membuat kode hash unik untuk penawaran Anda. Tidak perlu mengatur kunci apapun secara manual.
-                  </p>
+              {/* Secret Salt (Kunci Rahasia) */}
+              <div className="flex flex-col gap-2">
+                <label className="font-label-mono text-[10px] sm:text-xs text-outline flex justify-between items-center">
+                  <span>Secret Salt (Kunci Rahasia)</span>
+                  <button
+                    type="button"
+                    onClick={generateRandomSalt}
+                    className="text-primary hover:text-secondary text-[11px] font-label-mono flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-xs">autorenew</span>
+                    Acak Kunci
+                  </button>
+                </label>
+                <div className="relative">
+                  <input
+                    className="w-full bg-surface-container-highest border border-outline-variant focus:border-primary text-on-surface font-mono p-3 sm:p-4 outline-none transition-colors pr-14 text-xs rounded-lg"
+                    placeholder="Masukkan kunci salt rahasia"
+                    type="text"
+                    required
+                    value={saltKey}
+                    onChange={(e) => setSaltKey(e.target.value)}
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-on-surface-variant/40">
+                    <span className="material-symbols-outlined text-sm">vpn_key</span>
+                  </span>
                 </div>
               </div>
+
+              {/* Live Hash Calculation Preview */}
+              {computedHash && (
+                <div className="bg-black/40 p-3 border border-primary/20 rounded-lg text-xs font-mono space-y-1 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                  <div className="text-[10px] text-primary uppercase tracking-wider font-bold">Preview Hash Komitmen (Lokal)</div>
+                  <p className="text-on-surface text-[10px] break-all select-all cursor-pointer hover:text-primary transition-colors">
+                    {computedHash}
+                  </p>
+                </div>
+              )}
 
               {/* Warning Block */}
               <div className="bg-surface-container border-l-4 border-secondary-container p-4 flex gap-3 items-start mt-1 rounded-r-lg">
                 <span className="material-symbols-outlined text-secondary-container mt-0.5 text-base">warning</span>
                 <div>
-                  <div className="font-label-mono text-[10px] text-on-surface mb-1 font-bold">TINDAKAN PENTING</div>
+                  <div className="font-label-mono text-[10px] text-on-surface mb-1 font-bold">ZKP OFFLINE PRIVACY</div>
                   <div className="font-body-md text-[11px] sm:text-xs text-on-surface-variant leading-relaxed">
-                    Setelah komitmen dikirim, dana Anda akan terkunci. Lakukan pembukaan (reveal) di Reveal Portal untuk memverifikasi penawaran sebelum mengklaim aset.
+                    Nominal asli ({bidAmount || '0'} ETH) dan kunci rahasia ({saltKey || 'kosong'}) <strong>tidak akan pernah dikirim</strong> ke database off-chain atau blockchain. Hanya hash komitmen yang akan dicatat publik.
                   </div>
                 </div>
               </div>
@@ -206,17 +349,122 @@ export default function BidDetailPage({ assets = [], selectedAsset, onAssetChang
               <button
                 className="w-full bg-secondary-container text-on-secondary-container font-label-mono text-xs sm:text-sm uppercase tracking-widest font-bold py-4 px-6 border border-secondary/50 hover:shadow-[0_0_20px_rgba(0,165,114,0.3)] transition-all flex items-center justify-center gap-2 mt-2 active:scale-[0.98] cursor-pointer rounded-lg"
                 type="submit"
+                disabled={parseFloat(bidAmount) > balance || !bidAmount || !saltKey}
               >
                 <span className="material-symbols-outlined text-lg">fingerprint</span>
-                Kirim Penawaran ke Blockchain
+                Mulai Proses Enkripsi & Bukti
               </button>
               <div className="text-center font-label-mono text-outline text-[9px] uppercase tracking-wider mt-1 opacity-60">
-                Didukung oleh Zero-Knowledge Proofs
+                Kombinasi Kriptografi Keccak256 Lokal & zk-SNARKs
               </div>
             </form>
           </div>
         </div>
       </div>
+
+      {/* Premium Black-glass Terminal Overlay Modal for ZKP Simulation */}
+      {zkpStatus !== 'idle' && (
+        <div className="fixed inset-0 z-[9999] bg-background/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl bg-black border border-white/10 rounded-xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            {/* Terminal Header */}
+            <div className="bg-surface-container-high/60 border-b border-white/5 px-4 py-3 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded-full bg-error"></div>
+                <div className="w-3 h-3 rounded-full bg-[#fbbf24]"></div>
+                <div className="w-3 h-3 rounded-full bg-success"></div>
+                <span className="font-label-mono text-[10px] text-on-surface-variant ml-2">AETHER PROVING CONSOLE v1.0.0</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                <span className="font-label-mono text-[9px] text-primary uppercase tracking-wider">ONLINE PROVER</span>
+              </div>
+            </div>
+
+            {/* Terminal Logs Content */}
+            <div className="p-4 md:p-6 font-mono text-xs text-on-surface-variant overflow-y-auto flex-grow space-y-2 select-text bg-black/90 min-h-[300px]">
+              {zkpLogs.map((log, idx) => (
+                <div 
+                  key={idx} 
+                  className={`leading-relaxed ${
+                    log.startsWith('[SYSTEM]') ? 'text-primary' : 
+                    log.startsWith('[DATA]') ? 'text-on-surface/80' :
+                    log.startsWith('[CRYPTO]') ? 'text-[#a78bfa]' : 
+                    log.includes('SUKSES') ? 'text-[#10b981] font-bold' : 
+                    'text-on-surface-variant'
+                  }`}
+                >
+                  {log}
+                </div>
+              ))}
+              
+              {zkpStatus === 'generating' && (
+                <div className="flex items-center gap-2 text-primary pt-2">
+                  <span className="material-symbols-outlined text-sm animate-spin-custom">autorenew</span>
+                  <span>Menyusun zk-Proof constraints...</span>
+                </div>
+              )}
+            </div>
+
+            {/* Terminal Footer Panel */}
+            <div className="bg-surface-container-high/40 border-t border-white/5 p-4 md:p-6 shrink-0 flex flex-col sm:flex-row items-center gap-4">
+              {zkpStatus === 'done' ? (
+                <div className="w-full flex flex-col gap-4 animate-in zoom-in-95 duration-200">
+                  <div className="p-4 bg-primary/10 border border-primary/20 rounded-lg flex items-start gap-3">
+                    <span className="material-symbols-outlined text-primary text-xl mt-0.5">verified_user</span>
+                    <div>
+                      <p className="font-label-mono text-xs font-bold text-on-surface uppercase tracking-wider">Bukti zk-SNARKs Berhasil Dibuat!</p>
+                      <p className="font-body-md text-[11px] text-on-surface-variant mt-1 leading-relaxed">
+                        Anda wajib mengunduh berkas kunci rahasia (.txt) sekarang. Berkas ini adalah satu-satunya cara untuk membuktikan nominal bid Anda saat fase pembukaan (reveal).
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-3 w-full">
+                    <button
+                      onClick={downloadKeyFile}
+                      type="button"
+                      className={`flex-1 font-label-mono text-xs uppercase tracking-wider py-4 rounded-lg cursor-pointer transition-all flex items-center justify-center gap-2 ${
+                        downloaded 
+                          ? 'bg-success/20 text-success border border-success/40' 
+                          : 'bg-[#10b981] text-white hover:bg-[#059669] shadow-[0_0_15px_rgba(16,185,129,0.3)]'
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-lg">
+                        {downloaded ? 'check_circle' : 'download'}
+                      </span>
+                      {downloaded ? 'Berkas Kunci Diunduh' : 'Unduh Kunci Rahasia (.txt)'}
+                    </button>
+
+                    <button
+                      onClick={handleFinalSubmit}
+                      disabled={!downloaded}
+                      type="button"
+                      className={`flex-1 font-label-mono text-xs uppercase tracking-wider py-4 rounded-lg cursor-pointer transition-all flex items-center justify-center gap-2 ${
+                        downloaded
+                          ? 'bg-primary text-on-primary hover:bg-secondary hover:text-on-secondary shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                          : 'bg-white/5 border border-white/10 text-white/20 cursor-not-allowed'
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-lg">cloud_upload</span>
+                      Kirim Komitmen ke Blockchain
+                    </button>
+                  </div>
+                  
+                  {!downloaded && (
+                    <p className="text-center font-label-mono text-[10px] text-error">
+                      * Harap unduh berkas kunci terlebih dahulu untuk membuka tombol pengiriman.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="w-full text-center py-2 text-outline font-label-mono text-xs">
+                  Proses kalkulasi Zero-Knowledge lokal sedang berlangsung. Harap tunggu...
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

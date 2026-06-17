@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-export default function AuthPage({ onLoginSuccess }) {
+export default function AuthPage({ onLoginSuccess, showToast, triggerLoading }) {
   const [mode, setMode] = useState('login')
   const [formData, setFormData] = useState({
     nim: '',
@@ -41,13 +41,45 @@ export default function AuthPage({ onLoginSuccess }) {
     }))
   }
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
-    console.log(`Submitting ${mode} form:`, formData)
-    // Add blockchain authentication or API calls here
-    alert(`${mode === 'login' ? 'Memulai Sesi Protokol' : 'Mendaftarkan Identitas Node'} untuk ID Node: ${formData.nim}`)
-    if (onLoginSuccess) {
-      onLoginSuccess()
+    if (triggerLoading) {
+      await triggerLoading('Memverifikasi identitas node...')
+    }
+    try {
+      const url = mode === 'login' 
+        ? 'http://localhost:5000/api/auth/login' 
+        : 'http://localhost:5000/api/auth/register'
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nim: formData.nim,
+          password: formData.password,
+          username: `User-${formData.nim}`
+        })
+      })
+
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.error || 'Otentikasi gagal')
+      }
+
+      localStorage.setItem('token', data.token)
+      localStorage.setItem('user', JSON.stringify(data.user))
+      
+      if (showToast) {
+        showToast(mode === 'login' ? 'Sesi Protokol Dimulai!' : 'Identitas Node Berhasil Didaftarkan!', 'success')
+      }
+      if (onLoginSuccess) {
+        onLoginSuccess(data.user)
+      }
+    } catch (err) {
+      console.error(err)
+      if (showToast) {
+        showToast(err.message || 'Koneksi ke backend gagal', 'error')
+      }
     }
   }
 
